@@ -13,17 +13,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Initialize Hugging Face client
-client = InferenceClient(
-    provider="fal-ai",
-    api_key=os.environ["HF_TOKEN"],
-)
-
 class ImageGeneratorBot:
     def __init__(self):
         self.bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        self.hf_token = os.environ.get("HF_TOKEN")
+
         if not self.bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN environment variable is not set!")
+        if not self.hf_token:
+            raise ValueError("HF_TOKEN environment variable is not set!")
+
+        # Initialize Hugging Face client correctly
+        self.client = InferenceClient(token=self.hf_token)
 
         self.application = Application.builder().token(self.bot_token).build()
         self._setup_handlers()
@@ -41,7 +42,7 @@ class ImageGeneratorBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Send welcome message when /start is issued."""
         welcome_message = (
-            "🎨 **AI Image Generator Bot - Background Worker Mode**\n\n"
+            "🎨 **AI Image Generator Bot**\n\n"
             "Send me any text description and I'll generate an image for you!\n\n"
             "**Examples:**\n"
             "• `Astronaut riding a horse`\n"
@@ -69,7 +70,7 @@ class ImageGeneratorBot:
             "• Include style keywords (e.g., 'photorealistic', 'cartoon', 'oil painting')\n"
             "• Mention colors, lighting, and mood\n"
             "• Be patient - high-quality AI art takes time! 🎨\n\n"
-            "**Model:** FLUX.1-dev by Black Forest Labs\n"
+            "**Model:** Stable Diffusion\n"
             "**Mode:** Background Worker (Polling)"
         )
         await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -79,8 +80,7 @@ class ImageGeneratorBot:
         status_text = (
             "🟢 **Bot Status: Online**\n\n"
             "• **Mode:** Background Worker (Polling)\n"
-            "• **Model:** FLUX.1-dev\n"
-            "• **Provider:** Hugging Face (fal-ai)\n"
+            "• **Provider:** Hugging Face Inference API\n"
             "• **Status:** Ready to generate images\n\n"
             f"• **Your ID:** `{update.effective_user.id}`\n"
             f"• **Chat ID:** `{update.effective_chat.id}`"
@@ -111,12 +111,31 @@ class ImageGeneratorBot:
         )
 
         try:
-            # Generate image using Hugging Face
+            # Generate image using Hugging Face Inference API
             logger.info(f"Starting image generation for user {user_id}")
-            image = client.text_to_image(
-                user_prompt,
-                model="black-forest-labs/FLUX.1-dev",
-            )
+
+            # Try different models in order of preference
+            models_to_try = [
+                "black-forest-labs/FLUX.1-dev",
+                "stabilityai/stable-diffusion-xl-base-1.0", 
+                "runwayml/stable-diffusion-v1-5"
+            ]
+
+            image = None
+            used_model = None
+
+            for model in models_to_try:
+                try:
+                    logger.info(f"Trying model: {model}")
+                    image = self.client.text_to_image(user_prompt, model=model)
+                    used_model = model
+                    break
+                except Exception as model_error:
+                    logger.warning(f"Model {model} failed: {str(model_error)}")
+                    continue
+
+            if image is None:
+                raise Exception("All models failed to generate image")
 
             # Convert PIL image to bytes
             img_buffer = BytesIO()
@@ -126,13 +145,13 @@ class ImageGeneratorBot:
             # Send the image
             await update.message.reply_photo(
                 photo=img_buffer,
-                caption=f"🎨 **Generated Image**\n\n**Prompt:** `{user_prompt}`",
+                caption=f"🎨 **Generated Image**\n\n**Prompt:** `{user_prompt}`\n**Model:** `{used_model.split('/')[-1]}`",
                 parse_mode='Markdown'
             )
 
             # Delete status message
             await status_message.delete()
-            logger.info(f"Successfully generated image for user {user_id}")
+            logger.info(f"Successfully generated image for user {user_id} using {used_model}")
 
         except Exception as e:
             error_msg = str(e)
@@ -181,8 +200,12 @@ class ImageGeneratorBot:
 
 async def main():
     """Main function to run the bot."""
-    bot = ImageGeneratorBot()
-    await bot.run_polling()
+    try:
+        bot = ImageGeneratorBot()
+        await bot.run_polling()
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
+        raise
 
 if __name__ == '__main__':
     try:
